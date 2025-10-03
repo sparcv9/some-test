@@ -1,5 +1,9 @@
 import org.springframework.core.ParameterizedTypeReference
+import org.springframework.core.codec.DecodingException
+import org.springframework.core.io.buffer.DataBufferLimitException
 import org.springframework.web.reactive.function.client.WebClient
+import org.springframework.web.reactive.function.client.WebClient.RequestHeadersSpec
+import org.springframework.web.reactive.function.client.WebClientRequestException
 import org.springframework.web.util.UriBuilder
 import reactor.core.publisher.Mono
 import java.net.URI
@@ -19,6 +23,33 @@ class Connection(
     private fun <T> Mono<T>.requestSettings(): Mono<T> =
         timeout(Duration.ofMillis(configuration.requestTimeout))
             .retryWhen(configuration.retryPolicy)
+
+    private fun <T : Any> RequestHeadersSpec<*>.exchangeToBodyMono(
+        responseType: ParameterizedTypeReference<T>
+    ): Mono<T> {
+        return exchangeToMono { response ->
+            val status = response.statusCode()
+            if (status.is2xxSuccessful) {
+                response.bodyToMono(responseType)
+            } else {
+                response
+                    .bodyToMono(String::class.java)
+                    .defaultIfEmpty("")
+                    .flatMap { body ->
+                        Mono.error(ConnectionHttpException(status.value(), body))
+                    }
+            }
+        }
+            .requestSettings()
+            .onErrorMap { throwable ->
+                when (throwable) {
+                    is WebClientRequestException -> ConnectionNetworkException(throwable)
+                    is DecodingException -> ConnectionDeserializationException(throwable)
+                    is DataBufferLimitException -> ConnectionDeserializationException(throwable)
+                    else -> throwable
+                }
+            }
+    }
 
     inline fun <reified T : Any> performPostRequest(
         uri: String,
@@ -63,9 +94,7 @@ class Connection(
 
             headersSpec
                 .accept(configuration.mediaType)
-                .retrieve()
-                .bodyToMono(responseType)
-                .requestSettings()
+                .exchangeToBodyMono(responseType)
         }
     }
 
@@ -102,9 +131,7 @@ class Connection(
             webClient.get()
                 .uri(uri)
                 .accept(configuration.mediaType)
-                .retrieve()
-                .bodyToMono(responseType)
-                .requestSettings()
+                .exchangeToBodyMono(responseType)
         }
     }
 
@@ -121,9 +148,7 @@ class Connection(
             webClient.delete()
                 .uri(uri)
                 .accept(configuration.mediaType)
-                .retrieve()
-                .bodyToMono(responseType)
-                .requestSettings()
+                .exchangeToBodyMono(responseType)
         }
     }
 
@@ -170,9 +195,7 @@ class Connection(
 
             headersSpec
                 .accept(configuration.mediaType)
-                .retrieve()
-                .bodyToMono(responseType)
-                .requestSettings()
+                .exchangeToBodyMono(responseType)
         }
     }
 
@@ -215,3 +238,16 @@ class Connection(
     }
 
 }
+
+class ConnectionHttpException(
+    val statusCode: Int,
+    val responseBody: String
+) : RuntimeException("HTTP $statusCode: $responseBody")
+
+class ConnectionNetworkException(
+    cause: Throwable
+) : RuntimeException("Network error while calling remote service", cause)
+
+class ConnectionDeserializationException(
+    cause: Throwable
+) : RuntimeException("Failed to deserialize response from remote service", cause)
