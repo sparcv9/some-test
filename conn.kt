@@ -5,6 +5,7 @@ import org.springframework.web.reactive.function.client.WebClient
 import org.springframework.web.reactive.function.client.WebClient.RequestHeadersSpec
 import org.springframework.web.reactive.function.client.WebClientRequestException
 import org.springframework.web.util.UriBuilder
+import reactor.core.Exceptions
 import reactor.core.publisher.Mono
 import java.net.URI
 import java.time.Duration
@@ -42,7 +43,9 @@ class Connection(
         }
             .requestSettings()
             .onErrorMap { throwable ->
-                when (throwable) {
+                if (Exceptions.isRetryExhausted(throwable)) {
+                    ConnectionRetryExhaustedException(Exceptions.unwrap(throwable))
+                } else when (throwable) {
                     is WebClientRequestException -> ConnectionNetworkException(throwable)
                     is DecodingException -> ConnectionDeserializationException(throwable)
                     is DataBufferLimitException -> ConnectionDeserializationException(throwable)
@@ -251,3 +254,7 @@ class ConnectionNetworkException(
 class ConnectionDeserializationException(
     cause: Throwable
 ) : RuntimeException("Failed to deserialize response from remote service", cause)
+
+class ConnectionRetryExhaustedException(
+    cause: Throwable
+) : RuntimeException("Retry attempts exhausted", cause)
